@@ -32,6 +32,7 @@ Data:
   path: '/mnt/test/fMRI-dataset/ECCV2024-fmri-video-data-upload/fd-fmri-video-WebVid/'
   video_size: [576, 320] # [256, 640] # [h, w]
   fmri_size: [256, 256] # [256, 640] # [h, w]
+  data_aug: True
   subjects: [1,2]
 
 # Pretrained diffusers model path.

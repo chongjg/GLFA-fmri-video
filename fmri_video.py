@@ -36,6 +36,10 @@ from einops import rearrange
 from models.unet_3d_condition import UNet3DConditionModel
 from models.lora_handler import LoraHandler, LORA_VERSIONS
 from models.utils import *
+from models.eval_metrics import (ssim_score_only, 
+                          img_classify_metric, 
+                          video_classify_metric)
+import imageio.v3 as iio
 
 already_printed_trainables = False
 
@@ -345,6 +349,148 @@ def replace_prompt(prompt, token, wlist):
         if w in prompt: return prompt.replace(w, token)
     return prompt 
 
+def run_metrics(output_dir, device):
+    metrics = {}
+    gt_list = []
+    pred_list = []
+    print('loading validation results ...')
+    for i in range(400):
+        gif = iio.imread(os.path.join(output_dir, f'fmri-dataset-test-{i}.mp4'), index=None)
+        pred, gt = np.split(gif, 2, axis=2)
+        pred = pred[:,2:-2,2:-1]
+        gt = gt[:,2:-2,1:-2]
+        gt_list.append(gt)
+        pred_list.append(pred)
+    print('validation results loaded.')
+
+    gt_list = np.stack(gt_list)
+    pred_list = np.stack(pred_list)
+
+    print(f'pred shape: {pred_list.shape}, gt shape: {gt_list.shape}')
+
+    # image classification scores
+    n_way = [2,50]
+    num_trials = 100
+    top_k = 1
+    # video classification scores
+    acc_list, std_list = video_classify_metric(
+                                        pred_list,
+                                        gt_list,
+                                        n_way = n_way,
+                                        top_k=top_k,
+                                        num_trials=num_trials,
+                                        num_frames=gt_list.shape[1],
+                                        return_std=True,
+                                        device=device
+                                        )
+    for i, nway in enumerate(n_way):
+        print(f'video classification score ({nway}-way): {np.mean(acc_list[i])} +- {np.mean(std_list[i])}')
+        metrics[f'video {nway}-way mean'] = np.mean(acc_list[i])
+        metrics[f'video {nway}-way std'] = np.mean(np.mean(std_list[i]))
+
+    acc_aver = [[] for i in range(len(n_way))]
+    acc_std  = [[] for i in range(len(n_way))]
+    ssim_aver = []
+    ssim_std  = []
+    for i in range(pred_list.shape[1]):
+
+        # ssim scores
+        ssim_scores, std = ssim_score_only(pred_list[:, i], gt_list[:, i])
+        ssim_aver.append(ssim_scores)
+        ssim_std.append(std)
+
+        print(f'ssim score: {ssim_scores}, std: {std}')
+        
+        acc_list, std_list = img_classify_metric(
+                                            pred_list[:, i], 
+                                            gt_list[:, i], 
+                                            n_way = n_way, 
+                                            top_k=top_k, 
+                                            num_trials=num_trials, 
+                                            return_std=True,
+                                            device=device)
+        for idx, nway in enumerate(n_way):
+            acc_aver[idx].append(np.mean(acc_list[idx]))
+            acc_std[idx].append(np.mean(std_list[idx]))
+            print(f'img classification score ({nway}-way): {np.mean(acc_list[idx])} +- {np.mean(std_list[idx])}')
+
+    print('----------------- average results -----------------')
+    print(f'average ssim score: {np.mean(ssim_aver)}, std: {np.mean(ssim_std)}')
+    metrics[f'image ssim mean'] = np.mean(ssim_aver)
+    metrics[f'image ssim std'] = np.mean(ssim_std)
+    for i, nway in enumerate(n_way):
+        print(f'average img classification score ({nway}-way): {np.mean(acc_aver[i])} +- {np.mean(acc_std[i])}')
+        metrics[f'image {nway}-way mean'] = np.mean(acc_aver[i])
+        metrics[f'image {nway}-way std'] = np.mean(acc_std[i])
+    return metrics
+
+@torch.inference_mode()
+def validation_inference(
+    output_dir,
+    validation_data,
+    Model,
+    pipeline,
+    fmri_encoder: fMRI_encoder,
+    test_dataset: torch.utils.data.Dataset,
+    test_dataloader: torch.utils.data.DataLoader,
+    device: str = "cuda",
+    seed: int=666,
+):
+
+    output_dir = output_dir
+    width=validation_data.width
+    height=validation_data.height
+    num_frames=validation_data.num_frames
+    num_inference_steps=validation_data.num_inference_steps
+    guidance_scale=validation_data.guidance_scale
+
+    if seed is not None:
+        torch.manual_seed(seed)
+
+    window_size = Model['window_size']
+    with torch.autocast(device, dtype=torch.float):
+
+        with torch.no_grad():
+            fmri_negative_embedding = fmri_encoder(test_dataset.aver_fmri[:window_size][None].to('cuda'))['fmri_embedding']
+            torch.cuda.empty_cache()
+
+        for global_step, batch in enumerate(test_dataloader):
+            if global_step % 100 == 0:
+                print(f'---------------- step {global_step} / {len(test_dataloader)} ---------------- ')
+
+            torch.cuda.empty_cache()
+
+            prompt = batch['text_prompt'][0]
+            if global_step == 0:
+                with torch.no_grad():
+                    fmri_embedding = fmri_encoder(batch['image'][:,0].to('cuda'))['fmri_embedding']
+                    negative_embedding = fmri_negative_embedding.repeat(fmri_embedding.shape[0],1,1)
+
+            with torch.no_grad():
+                video_frames = pipeline(
+                    fmri_embedding,
+                    negative_embedding=negative_embedding,#text_negative_embedding,
+                    prompt=prompt,
+                    width=width,
+                    height=height,
+                    num_frames=num_frames,
+                    num_inference_steps=num_inference_steps,
+                    guidance_scale=guidance_scale,
+                    output_type='pt',
+                ).frames
+
+                video_frames = video_frames.clamp(-1, 1).add(1).div(2).cpu()
+                pixel_values = (batch['pixel_values'].transpose(1, 2).cpu() + 1.) / 2.
+
+                for frame_id in range(video_frames.shape[0]):
+                    out_file = f"{output_dir}/fmri-dataset-test-{global_step+frame_id}.mp4"
+                    video_frame = video_frames[frame_id:frame_id+1]
+                    pixel_value = pixel_values[frame_id:frame_id+1]
+                    
+                    save_videos_grid(torch.cat([video_frame, pixel_value]), out_file, fps=num_frames//4)
+    
+    return run_metrics(output_dir, device)
+
 def main(
     pretrained_model_path: str,
     output_dir: str,
@@ -508,6 +654,15 @@ def main(
         stage='fmri-video',
         subjects=Data['subjects'],
     )
+    test_dataset = fd_fmri_video_dataset(
+        path=Data['path'],
+        video_size=Data['video_size'],
+        fmri_size=Data['fmri_size'],
+        window_size=Model['window_size'],
+        phase='test',
+        stage='fmri-video',
+        subjects=Data['test_subjects'],
+    )
 
     # DataLoaders creation:
     train_dataloader = torch.utils.data.DataLoader(
@@ -515,6 +670,12 @@ def main(
         batch_size=train_batch_size,
         shuffle=shuffle,
         num_workers=6,
+    )
+    test_dataloader = torch.utils.data.DataLoader(
+        test_dataset,
+        batch_size=1,
+        shuffle=False,
+        num_workers=0,
     )
 
     # Prepare everything with our `accelerator`.
@@ -636,20 +797,20 @@ def main(
         outputs = []
         reg_loss = 0.
         align_loss = 0.
-        align_embedding_loss = 0.
+        align_embedding_loss = torch.tensor(0.)
         align_cnt = 0
         for subid in range(num_sbjs):
             outputs.append(fmri_encoder(batch['image'][:,subid]))
             if Model['global_align']:
-                reg_loss = F.mse_loss(outputs[subid]['func_align_fmri'].reshape(BN*Model['window_size'], -1)[:, fmri_mask], batch['image'][:,subid].reshape(BN*Model['window_size'], -1)[:, fmri_mask], reduction="mean")
+                reg_loss = reg_loss + F.mse_loss(outputs[subid]['func_align_fmri'].reshape(BN*Model['window_size'], -1)[:, fmri_mask], batch['image'][:,subid].reshape(BN*Model['window_size'], -1)[:, fmri_mask], reduction="mean")
                 for pre_sub in range(subid):
                     align_cnt += 1
                     align_loss = align_loss + F.mse_loss(outputs[subid]['func_align_fmri'].reshape(BN*Model['window_size'], -1)[:, fmri_mask], outputs[pre_sub]['func_align_fmri'].reshape(BN*Model['window_size'], -1)[:, fmri_mask], reduction="mean")
-                    align_embedding_loss = align_embedding_loss + F.mse_loss(outputs[subid]['fmri_embedding'], outputs[pre_sub]['fmri_embedding'], reduction="mean")
+                    # align_embedding_loss = align_embedding_loss + F.mse_loss(outputs[subid]['fmri_embedding'], outputs[pre_sub]['fmri_embedding'], reduction="mean")
         if Model['global_align']:
             reg_loss = reg_loss / num_sbjs
             align_loss = align_loss / align_cnt
-            align_embedding_loss = align_embedding_loss / align_cnt
+            # align_embedding_loss = align_embedding_loss / align_cnt
 
         encoder_hidden_states = torch.cat([item['fmri_embedding'] for item in outputs], 0)
 
@@ -764,6 +925,17 @@ def main(
                             diffusion_scheduler = DPMSolverMultistepScheduler.from_config(pipeline.scheduler.config)
                             pipeline.scheduler = diffusion_scheduler
 
+                            validation_output_dir = os.path.join(output_dir, f"sample-validation/{global_step}")
+                            metrics = validation_inference(
+                                output_dir=validation_output_dir,
+                                validation_data=validation_data,
+                                Model=Model,
+                                pipeline=pipeline,
+                                fmri_encoder=fmri_encoder,
+                                test_dataset=test_dataset,
+                                test_dataloader=test_dataloader,
+                            )
+                            
                             prompt = text_prompt# if len(validation_data.prompt) <= 0 else validation_data.prompt
                             with torch.no_grad():
                                 aver_fmri = train_dataset.aver_fmri[:Model['window_size']][None].to('cuda')

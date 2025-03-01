@@ -1,8 +1,8 @@
-output_dir: "./outputs-inference/fmri-video-sub12-funcalign-22k"
+output_dir: "./outputs-inference/fmri-video-sub12-funcalign"
 
 Model:
   stage: 'fmri2video'
-  pretrained_weight: './outputs/fmri-video-sub12-funcalign/checkpoint-22000/fmri-encoder-checkpoint.pth'
+  pretrained_weight: './outputs/fmri-video-sub12-funcalign/checkpoint/fmri-encoder-checkpoint.pth'
   # - transformer-
   in_chans: 1
   encoder_depth: 24 # 24
@@ -34,7 +34,7 @@ Data:
   subjects: [3]
 
 # Pretrained diffusers model path.
-pretrained_model_path: "./outputs/fmri-video-sub12-funcalign/checkpoint-22000/"
+pretrained_model_path: "./outputs/fmri-video-sub12-funcalign/checkpoint/"
 # pretrained_model_path: "./models/model_scope_diffusers/" #https://huggingface.co/damo-vilab/text-to-video-ms-1.7b/tree/main
 
 # The folder where your training outputs will be placed.

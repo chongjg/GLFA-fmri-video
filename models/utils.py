@@ -31,7 +31,116 @@ else:
 
 from models.LocallyConnected2d import LocallyConnected2d
 
+#stop words list
+stop_words = ['i', 'me', 'my', 'myself', 'we', 'our', 
+			'ours', 'ourselves', 'you', 'your', 'yours', 
+			'yourself', 'yourselves', 'he', 'him', 'his', 
+			'himself', 'she', 'her', 'hers', 'herself', 
+			'it', 'its', 'itself', 'they', 'them', 'their', 
+			'theirs', 'themselves', 'what', 'which', 'who', 
+			'whom', 'this', 'that', 'these', 'those', 'am', 
+			'is', 'are', 'was', 'were', 'be', 'been', 'being', 
+			'have', 'has', 'had', 'having', 'do', 'does', 'did',
+			'doing', 'a', 'an', 'the', 'and', 'but', 'if', 'or',
+			'because', 'as', 'until', 'while', 'of', 'at', 
+			'by', 'for', 'with', 'about', 'against', 'between',
+			'into', 'through', 'during', 'before', 'after', 
+			'above', 'below', 'to', 'from', 'up', 'down', 'in',
+			'out', 'on', 'off', 'over', 'under', 'again', 
+			'further', 'then', 'once', 'here', 'there', 'when', 
+			'where', 'why', 'how', 'all', 'any', 'both', 'each', 
+			'few', 'more', 'most', 'other', 'some', 'such', 'no', 
+			'nor', 'not', 'only', 'own', 'same', 'so', 'than', 'too', 
+			'very', 's', 't', 'can', 'will', 'just', 'don', 
+			'should', 'now', '']
+
+# data augmentation code in nlp from https://maelfabien.github.io/machinelearning/NLP_8/#
+from nltk.corpus import wordnet 
+
+def get_synonyms(word):
+    """
+    Get synonyms of a word
+    """
+    synonyms = set()
+     
+    for syn in wordnet.synsets(word):
+        for l in syn.lemmas(): 
+            synonym = l.name().replace("_", " ").replace("-", " ").lower()
+            synonym = "".join([char for char in synonym if char in ' qwertyuiopasdfghjklzxcvbnm'])
+            synonyms.add(synonym) 
+    
+    if word in synonyms:
+        synonyms.remove(word)
+   
+    return list(synonyms)
+
+def synonym_replacement(words, n):
+    
+    words = words.split()
+    
+    new_words = words.copy()
+    random_word_list = list(set([word for word in words if word not in stop_words]))
+    random.shuffle(random_word_list)
+    num_replaced = 0
+    
+    for random_word in random_word_list:
+        synonyms = get_synonyms(random_word)
+        
+        if len(synonyms) >= 1:
+            synonym = random.choice(list(synonyms))
+            new_words = [synonym if word == random_word else word for word in new_words]
+            num_replaced += 1
+        
+        if num_replaced >= n: #only replace up to n words
+            break
+
+    sentence = ' '.join(new_words)
+
+    return sentence
+
+def swap_word(new_words):
+    
+    random_idx_1 = random.randint(0, len(new_words)-1)
+    random_idx_2 = random_idx_1
+    counter = 0
+    
+    while random_idx_2 == random_idx_1:
+        random_idx_2 = random.randint(0, len(new_words)-1)
+        counter += 1
+        
+        if counter > 3:
+            return new_words
+    
+    new_words[random_idx_1], new_words[random_idx_2] = new_words[random_idx_2], new_words[random_idx_1] 
+    return new_words
+
+def random_swap(words, n):
+    
+    words = words.split()
+    new_words = words.copy()
+    
+    for _ in range(n):
+        new_words = swap_word(new_words)
+        
+    sentence = ' '.join(new_words)
+    
+    return sentence
+
+class random_crop:
+    def __init__(self, size, p):
+        self.size = size
+        self.p = p
+    def __call__(self, img):
+        if torch.rand(1) < self.p:
+            return transforms.RandomCrop(size=self.size)(img)
+        return img
+
 class fd_fmri_video_dataset(torch.utils.data.Dataset):
+
+    def text_transform(self, words):
+        words = random_swap(words, n=1)
+        words = synonym_replacement(words, n=1)
+        return words
 
     def mask_init(self):
         # Mask
@@ -71,7 +180,9 @@ class fd_fmri_video_dataset(torch.utils.data.Dataset):
                  sample_frame_rate: int = 3,
 
                  subjects = [1,2,3,4,5],
-                 stage='fmri-video'
+                 stage='fmri-video',
+
+                 data_aug: bool = False,
         ):
 
         super().__init__()
@@ -81,6 +192,13 @@ class fd_fmri_video_dataset(torch.utils.data.Dataset):
         self.path = path
         self.vid_per_run = vid_per_run
         self.stage = stage
+        self.data_aug = data_aug
+        if self.data_aug:
+            print('using data augmentation.')
+            self.image_transform = transforms.Compose([
+                random_crop((round(video_size[1] * 0.8), round(video_size[0] * 0.8)), p=0.5),
+                transforms.Resize(video_size),
+            ])
 
         self.subjects = subjects
         if phase == 'train':
@@ -139,7 +257,7 @@ class fd_fmri_video_dataset(torch.utils.data.Dataset):
 
         #################### fmri #####################
 
-        self.fmri_frames = 10 + lag # 8s video + 5*0.8s lag
+        self.fmri_frames = 10 + window_size # 8s video + 5*0.8s lag
         self.fmri_size = fmri_size # (H, W)
         self.del_frames = del_frames
         self.lag = lag
@@ -234,6 +352,10 @@ class fd_fmri_video_dataset(torch.utils.data.Dataset):
 
         fmri = self.fmri_data[:,runid, timid : timid + self.window_size]
         fmri = torch.from_numpy(fmri)[:, :, None]
+
+        if self.data_aug:
+            video = self.image_transform(video)
+            text_prompt = self.text_transform(text_prompt)
 
         item = {'text_prompt': text_prompt, 'pixel_values': video, 'image': fmri}
         return item

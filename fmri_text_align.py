@@ -236,6 +236,7 @@ def main(
         phase='train',
         stage='fmri-text',
         subjects=Data['subjects'],
+        data_aug=Data['data_aug'],
     )
     test_dataset = fd_fmri_video_dataset(
         path=Data['path'],
@@ -245,6 +246,7 @@ def main(
         phase='test',
         stage='fmri-text',
         subjects=Data['subjects'],
+        data_aug=False,
     )
 
     # DataLoaders creation:

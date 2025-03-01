@@ -1,4 +1,4 @@
-NAME: fmri-video-sub12-funcalign-new
+NAME: fmri-video-sub12
 
 Model:
   stage: 'fmri2video'
@@ -26,20 +26,20 @@ Model:
 
   fmri2clip_cfg: 'fmri2clip'
 
-  reg_scale: 0.5
-  align_scale: 1
+  reg_scale: 1
+  align_scale: 0.1
   align_embedding_scale: 0
 
-  func_kernel_size: 13
-  global_align: True
+  # func_kernel_size: 13
+  # global_align: True
+  func_kernel_size: 1
+  global_align: False
 
 Data:
+  # path: '/ssd/lichong/fMRI-dataset/FD-dataset/fd-fmri-video-WebVid/'
   path: '/mnt/test/fMRI-dataset/ECCV2024-fmri-video-data-upload/fd-fmri-video-WebVid/'
   video_size: [576, 320] # [256, 640] # [h, w]
   fmri_size: [256, 256] # [256, 640] # [h, w]
-  data_aug: False
-  noise_type: pepper
-  noise_scale: 0
   subjects: [1,2]
 
 # Pretrained diffusers model path.
@@ -175,7 +175,7 @@ max_train_steps: 30000
 checkpointing_steps: 2000
 
 # How many steps to do for validation if sample_preview is enabled.
-validation_steps: 100
+validation_steps: 50
 
 # Which modules we want to unfreeze for the UNET. Advanced usage.
 trainable_modules:
